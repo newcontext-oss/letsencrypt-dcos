@@ -1,0 +1,65 @@
+{
+  "id": "/letsencrypt-dcos",
+  "cpus": 0.05,
+  "mem": 512,
+  "instances": 1,
+  "container": {
+    "type": "DOCKER",
+    "volumes": [
+      {
+        "containerPath": "/etc/letsencrypt",
+        "hostPath": "data",
+        "mode": "RW"
+      },
+      {
+        "containerPath": "data",
+        "mode": "RW",
+        "persistent": {
+          "size": 500
+        }
+      }
+    ],
+    "docker": {
+      "forcePullImage": true,
+      "image": "dcoslabs/letsencrypt-dcos:v1.0.8",
+      "network": "BRIDGE",
+      "portMappings": [
+        {
+          "containerPort": 80,
+          "servicePort": 10000,
+          "protocol": "tcp"
+        }
+      ]
+    }
+  },
+  "env": {
+    "MARATHON_LB_ID": "marathon-lb",
+    "MARATHON_URL": "http://marathon.mesos:8080",
+    "LETSENCRYPT_EMAIL": "dayne@example.com",
+    "LETSENCRYPT_SERVER_URL": "https://acme-staging-v02.api.letsencrypt.org/directory",
+    "DNS_PROPAGATION_TIMEOUT": "120",
+    "DNS_PROVIDER": "route53",
+    "LETSENCRYPT_VERIFICATION_METHOD": "dns",
+    "DOMAINS": "*.test.example.com,ssl-test-1.example.com,ssl-test-2.example.com",
+    "AWS_ACCESS_KEY_ID": {
+      "secret": "secret0"
+    },
+    "AWS_SECRET_ACCESS_KEY": {
+      "secret": "secret1"
+    }
+
+  },
+  "secrets": {
+    "secret0": {
+      "source": "letsencrypt-dcos-aws-key-id"
+    },
+    "secret1": {
+      "source": "letsencrypt-dcos-aws-secret-key"
+    }
+  },
+  "backoffSeconds": 5,
+  "upgradeStrategy": {
+    "minimumHealthCapacity": 0.5,
+    "maximumOverCapacity": 0
+  }
+}

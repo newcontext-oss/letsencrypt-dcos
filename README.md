@@ -2,6 +2,8 @@
 
 This is a sample [Marathon](https://github.com/mesosphere/marathon) app for encrypting your [Marathon-lb](https://github.com/mesosphere/marathon-lb) HAProxy endpoints using [Let's Encrypt](https://letsencrypt.org/). With this, you can automatically generate and renew valid SSL certs with Marathon-lb.
 
+The work done to support wildcard certificates and the DNS providers, was influenced heavily by the work done by Sebastian Woehrl ([https://github.com/MaibornWolff/letsencrypt-marathon-lb](https://github.com/MaibornWolff/letsencrypt-marathon-lb)).
+
 ## Getting started
 
 Ensure you have **at least 2 or more** public agents in your DC/OS cluster, and that marathon-lb is scaled out to more than 1 public agent. Deploying this app requires this since it entails restarting marathon-lb.
@@ -66,6 +68,13 @@ There are 2 test apps included, based on [openresty](https://openresty.org/), wh
 ## How does it work?
 
 The app includes a script: [`run_cert.py`](run_cert.py). The script will generate the initial SSL cert and POST the cert to Marathon for Marathon-lb. It will then attempt to renew & update the cert every 24 hours. It will compare the current cert in Marathon to the current live cert, and update it as necessary.
+
+The script does the following steps depending on the verification method:
+
+* The script will get the domains from its own **HAPROXY_0_VHOST** label or the **DOMAINS** environment variable depending on verification mode and instruct lego to request a certificate for them.
+* If verification method is **http**: Due to the **HAPROXY_0_VHOST** and **HAPROXY_0_PATH** labels marathon-lb will proxy all requests to the letsencrypt verification paths for these domains to the script where certbot will receive them and do a webroot-based verification.
+* If verification method is **dns**: Using the provided credentials for your dns provider certbot will perform dns verification and add the required acme challenge dns TXT records to your zone.
+* The script then uses the marathon api to update the **HAPROXY_SSL_CERT** variable of the marathon-lb app which will then (after a restart of the app) use the provided certificate for HTTPS connections.
 
 A persistent volume called `data` is mounted inside the container at `/etc/letsencrypt` which contains the certificates and other generated state.
 

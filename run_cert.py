@@ -6,6 +6,7 @@ import json
 import requests
 import time
 import operator
+from pathlib import Path
 
 ENV_MARATHON_APP_ID = "MARATHON_APP_ID"
 ENV_MARATHON_URL = "MARATHON_URL"
@@ -74,8 +75,7 @@ def get_letsencrypt_url():
 
 def get_marathon_app(app_id):
     """Retrieve app definition for marathon-lb app"""
-    response = requests.get("%(marathon_url)s/v2/apps/%(app_id)s"
-                            % dict(marathon_url=get_marathon_url(), app_id=app_id), verify=False)
+    response = requests.get(f"{get_marathon_url()}/v2/apps/{app_id}", verify=False)
     if not response.ok:
         raise Exception("Could not get app details from marathon")
     return response.json()
@@ -96,6 +96,13 @@ def write_domains_to_file(domains):
         domains_file.write(domains)
 
 
+def rewrite_domain_name(domain_name):
+    """Rewrite domain_name if it is a wildcard"""
+    if domain_name.startswith("*"):
+        domain_name = domain_name.replace("*.", "")
+    return domain_name
+
+
 def find_newest_dir(domain_name):
     dirs = {}
     # Check if the certificate has been recreated with a new domain list
@@ -111,27 +118,11 @@ def find_newest_dir(domain_name):
 
 def write_combined_cert_to_file(domain_name):
     """Create the combined cert from the full chain and private key files"""
-    if domain_name.startswith("*"):
-        domain_name = domain_name.replace("*.", "")
-
+    domain_name = rewrite_domain_name(domain_name)
     latest_cert_dir = find_newest_dir(domain_name)
 
-    full_chain_file = f"{latest_cert_dir}/fullchain.pem"
-    private_key_file = f"{latest_cert_dir}/privkey.pem"
-    combined_cert = f"{latest_cert_dir}/{domain_name}.pem"
-
-    print("Writing combined certificate for marathon-lb to this path: %s" % combined_cert, flush=True)
-    with open(full_chain_file) as f:
-        with open(combined_cert, "w+") as f1:
-            for line in f:
-                f1.write(line)
-
-    # Marathon-lb requires that the entire certificate chain including private key
-    # be combined into a single PEM formatted file.
-    with open(private_key_file) as f:
-        with open(combined_cert, "a") as f1:
-            for line in f:
-                f1.write(line)
+    Path(f"{latest_cert_dir}/{domain_name}.pem").write_text(Path(f"{latest_cert_dir}/fullchain.pem").read_text() +
+        Path(f"{latest_cert_dir}/privkey.pem").read_text())
 
 
 def configure_provider_creds():
@@ -141,21 +132,23 @@ def configure_provider_creds():
         dns_provider = os.environ.get(ENV_DNS_PROVIDER)
         if dns_provider == "google":
             service_account = os.environ.get(ENV_GCE_SERVICE_ACCOUNT, "")
-            if len(service_account) > 0:
+            if len(service_account) == 0:
+                raise Exception("GCE_SERVICE_ACCOUNT is not defined")
+            else:
                 with open(DEFAULT_GCE_CREDENTIALS, "w+") as creds_file:
                     creds_file.write(service_account)
 
                 os.chown(DEFAULT_GCE_CREDENTIALS, 0, 0)
                 os.chmod(DEFAULT_GCE_CREDENTIALS, stat.S_IREAD)
                 print("Creating GCE Service Account file", flush=True)
-            else:
-                raise Exception("GCE_SERVICE_ACCOUNT is not defined")
         elif dns_provider == "route53":
             if len(os.environ.get("AWS_ACCESS_KEY_ID", "")) == 0 or len(
                     os.environ.get("AWS_SECRET_ACCESS_KEY", "")) == 0:
                 raise Exception("AWS_ACCESS_KEY_ID or AWS_SECRET_ACCESS_KEY is not defined")
         else:
-            raise Exception("Unknown DNS verification method")
+            raise Exception("Unknown DNS provider")
+    elif verification_method != "http":
+        raise Exception("Unknown verification method: " + verification_method)
 
 
 def get_domains():
@@ -172,8 +165,7 @@ def get_domains():
 
 def get_cert_filepath(domain_name):
     """Retrieve the certificate path based on the domain name"""
-    if domain_name.startswith("*"):
-        domain_name = domain_name.replace("*.", "")
+    domain_name = rewrite_domain_name(domain_name)
     latest_cert_dir = find_newest_dir(domain_name)
     return f"{latest_cert_dir}/{domain_name}.pem"
 
@@ -181,13 +173,12 @@ def get_cert_filepath(domain_name):
 def update_marathon_app(app_id, **kwargs):
     """Post new certificate data (as environment variable) to marathon to update the marathon-lb app definition"""
     print("Uploading certificates", flush=True)
-    data = dict(id=app_id)
-    for key, value in kwargs.items():
-        data[key] = value
+
+    data = kwargs.copy()
+    data['id'] = app_id
     headers = {'Content-Type': 'application/json'}
-    response = requests.put(
-        "%(marathon_url)s/v2/apps/%(app_id)s" % dict(marathon_url=get_marathon_url(), app_id=app_id),
-        headers=headers, data=json.dumps(data), verify=False)
+    response = requests.put(f"{get_marathon_url()}/v2/apps/{app_id}",headers=headers,
+                            data=json.dumps(data), verify=False)
     if not response.ok:
         print(response)
         print(response.text, flush=True)
@@ -202,12 +193,13 @@ def update_marathon_app(app_id, **kwargs):
     # Wait for deployment to complete
     deployment_exists = True
     sum_wait_time = 0
+    sleep_time = 5
     while deployment_exists:
-        time.sleep(5)
-        sum_wait_time += 5
+        time.sleep(sleep_time)
+        sum_wait_time += sleep_time
         print("Waiting for deployment to complete", flush=True)
         # Retrieve list of running deployments
-        response = requests.get("%(marathon_url)s/v2/deployments" % dict(marathon_url=get_marathon_url()), verify=False)
+        response = requests.get(f"{get_marathon_url()}/v2/deployments", verify=False)
         deployments = response.json()
         deployment_exists = False
         for deployment in deployments:
@@ -215,7 +207,7 @@ def update_marathon_app(app_id, **kwargs):
             if deployment['id'] == deployment_id:
                 deployment_exists = True
                 break
-        if deployment_exists and sum_wait_time > 60 * 5:
+        if deployment_exists and sum_wait_time > 60 * sleep_time:
             raise Exception("Failed to update app due to timeout in deployment.")
     print("Successfully uploaded certificates", flush=True)
 
@@ -245,13 +237,12 @@ def generate_letsencrypt_cert(domains):
             raise Exception("Unknown DNS provider: " + dns_provider)
 
     """Check if we already have a certificate"""
-    if not domains_changed and os.path.exists(
-            "%(path)s/%(domain_name)s/%(domain_name)s.pem" % dict(path=CERTIFICATES_DIR, domain_name=first_domain)):
+    if not domains_changed and os.path.exists(f"{CERTIFICATES_DIR}/{first_domain}/{first_domain}.pem"):
         print("About to attempt renewal of certificate", flush=True)
         certbot_args = ["certbot", "renew"]
     else:
         print("Running certbot to generate initial signed cert", flush=True)
-        print("Using server %(url)s" % dict(url=get_letsencrypt_url()), flush=True)
+        print(f"Using server {get_letsencrypt_url()}", flush=True)
         certbot_args = DEFAULT_CERTBOT_ARGS + certbot_args
 
     """Run Certbot with the configured arguments"""
